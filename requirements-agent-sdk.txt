@@ -1,0 +1,13 @@
+# Extra dependency for agent_hub_sdk.py ONLY — kept out of requirements.txt
+# because it's a separate toolchain from the anthropic-based scripts.
+#
+# Unlike the `anthropic` SDK (raw Messages API), the Claude Agent SDK drives a
+# full agent loop by spawning the Claude Code CLI as a subprocess. So it also
+# requires, outside pip:
+#   - Node.js 18+
+#   - the Claude Code CLI:  npm install -g @anthropic-ai/claude-code
+#
+# Install into the same .venv:  .venv/bin/pip install -r requirements-agent-sdk.txt
+# (claude-agent-sdk pulls in mcp, which agent_mcp.py / agent_hub.py also use.)
+
+claude-agent-sdk==0.2.110
