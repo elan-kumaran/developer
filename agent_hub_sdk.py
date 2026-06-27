@@ -45,6 +45,8 @@ from claude_agent_sdk import (
     AgentDefinition,
     AssistantMessage,
     ClaudeAgentOptions,
+    HookContext,
+    HookMatcher,
     ResultMessage,
     TextBlock,
     create_sdk_mcp_server,
@@ -158,6 +160,46 @@ ORCH_SYSTEM = (
 )
 
 
+# --- Subagent lifecycle hooks -----------------------------------------------
+# These two events fire from the SDK's built-in **Task** tool — the same tool the
+# orchestrator uses to delegate. There is no separate code path to trigger them:
+# every `Task → <spoke>` delegation fires SubagentStart when the spoke is spawned
+# and SubagentStop when it returns. So the demo query (which fans out to math,
+# text, AND time) triggers each hook three times. The callbacks below just observe
+# — they print to STDERR so the run's stdout answer stays clean — and return {}
+# (no `decision`/`hookSpecificOutput`, so they neither block nor inject context).
+#
+# Hook callback signature (claude_agent_sdk.HookCallback):
+#   async (input_data, tool_use_id, context) -> HookJSONOutput
+# input_data is the event's TypedDict (a plain dict at runtime). For these two:
+#   SubagentStart: hook_event_name, agent_id, agent_type, session_id, ...
+#   SubagentStop:  + stop_hook_active, agent_transcript_path
+
+
+async def on_subagent_start(
+    input_data: dict[str, Any], tool_use_id: str | None, context: HookContext
+) -> dict[str, Any]:
+    """Fires when the orchestrator's Task tool spawns a spoke subagent."""
+    print(
+        f"\033[2m[hook] SubagentStart  → spawned '{input_data.get('agent_type')}' "
+        f"(agent_id={input_data.get('agent_id')})\033[0m",
+        file=sys.stderr,
+    )
+    return {}  # observe only — no decision, no injected context
+
+
+async def on_subagent_stop(
+    input_data: dict[str, Any], tool_use_id: str | None, context: HookContext
+) -> dict[str, Any]:
+    """Fires when a spoke subagent finishes and control returns to the hub."""
+    print(
+        f"\033[2m[hook] SubagentStop   ← finished '{input_data.get('agent_type')}' "
+        f"(agent_id={input_data.get('agent_id')})\033[0m",
+        file=sys.stderr,
+    )
+    return {}
+
+
 # --- Hub (orchestrator) -----------------------------------------------------
 
 
@@ -175,7 +217,15 @@ async def run_orchestrator(prompt: str) -> str:
         allowed_tools=[CALC, TIME, STATS, "Task"],
         system_prompt=ORCH_SYSTEM,
         model=MODEL,
-    ) 
+        # Observe the Task-driven spoke lifecycle. A bare HookMatcher (no `matcher`)
+        # runs on every occurrence of the event; SubagentStart/Stop carry no tool
+        # name to match on anyway. query() plumbs these through even for a plain
+        # string prompt (the SDK always runs in streaming mode internally).
+        hooks={
+            "SubagentStart": [HookMatcher(hooks=[on_subagent_start])],
+            "SubagentStop": [HookMatcher(hooks=[on_subagent_stop])],
+        },
+    )
 
     final = ""
     async for message in query(prompt=prompt, options=options):
@@ -191,18 +241,42 @@ async def run_orchestrator(prompt: str) -> str:
     return final.strip()
 
 
-def main() -> None:
-    if len(sys.argv) > 1:
-        queries = [" ".join(sys.argv[1:])]
-    else:
-        queries = [
-            "Compute 12.5% of 840 divided by 3, tell me the current time in Asia/Kolkata, "
-            "and count the words in 'The quick brown fox jumps.' — all in one answer.",
-        ]
+# The default query, shown pre-filled in the prompt so the user can accept it
+# (just press Enter) or edit it inline before submitting.
+DEFAULT_QUERY = (
+    "Compute 12.5% of 840 divided by 3, tell me the current time in Asia/Kolkata, "
+    "and count the words in 'The quick brown fox jumps.' — all in one answer."
+)
 
-    for q in queries:
-        print(f"\n\033[1mQ:\033[0m {q}")
-        print(f"\033[1mA:\033[0m {asyncio.run(run_orchestrator(q))}")
+
+def _input_with_prefill(prompt: str, text: str) -> str:
+    """Like input(), but starts with `text` already in the editable line buffer."""
+    import readline  # POSIX-only; present on macOS/Linux where this script runs
+
+    def _hook() -> None:
+        readline.insert_text(text)
+        readline.redisplay()
+
+    readline.set_pre_input_hook(_hook)
+    try:
+        return input(prompt)
+    finally:
+        readline.set_pre_input_hook()  # clear it so later input() calls are clean
+
+
+def main() -> None:
+    # One-shot mode: a query on the command line bypasses the prompt entirely.
+    if len(sys.argv) > 1:
+        query = " ".join(sys.argv[1:])
+    else:
+        # Interactive: show the default query pre-filled and editable.
+        query = _input_with_prefill("\033[1mQuery:\033[0m ", DEFAULT_QUERY).strip()
+        if not query:
+            print("No query entered — nothing to do.")
+            return
+
+    print(f"\n\033[1mQ:\033[0m {query}")
+    print(f"\033[1mA:\033[0m {asyncio.run(run_orchestrator(query))}")
 
 
 if __name__ == "__main__":
