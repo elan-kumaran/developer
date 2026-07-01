@@ -1,0 +1,8 @@
+# Dependencies for agent_a2a.py — a Claude Agent SDK orchestrator that talks to a
+# remote (HTTP) MCP server AND to a foreign-framework agent over the A2A protocol.
+# Kept separate from requirements.txt (raw anthropic SDK) and requirements-agent-sdk.txt.
+# Also needs the Claude Code CLI (Node 18+):  npm install -g @anthropic-ai/claude-code
+claude-agent-sdk>=0.2.110
+a2a-sdk>=1.1.0
+uvicorn>=0.30
+python-dotenv

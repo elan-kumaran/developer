@@ -2,7 +2,7 @@
 
 An early-stage Python project for experimenting with the [Anthropic Claude API](https://docs.anthropic.com/), exploring a deliberate progression from a simple in-process tool registry all the way to a hub-and-spoke multi-agent system — and finally re-expressing that design on the higher-level Claude Agent SDK.
 
-## The five scripts
+## The scripts
 
 | Script | What it does |
 | --- | --- |
@@ -11,6 +11,7 @@ An early-stage Python project for experimenting with the [Anthropic Claude API](
 | `agent_mcp.py` | Same functionality as `agent.py`, but the tools are served over **MCP** (Model Context Protocol) instead of being registered in-process. One file plays both roles (server + client). |
 | `agent_hub.py` | A **hub-and-spoke multi-agent** system: each spoke is its own Claude agent (own system prompt + own tools) exposed over MCP as a single `ask_<spoke>_agent(task)` delegation tool. The hub is an orchestrator loop whose only tools are those sub-agents. |
 | `agent_hub_sdk.py` | The **same hub-and-spoke design** as `agent_hub.py`, but built on the **Claude Agent SDK** (`claude-agent-sdk`). Spokes are declarative `AgentDefinition`s and the SDK supplies the orchestration. |
+| `agent_a2a.py` | A Claude Agent SDK orchestrator that reaches **outward** two ways: to a **remote (HTTP) MCP server** (public DeepWiki, no auth) and to a **foreign-framework agent over the [A2A protocol](https://a2a-protocol.org/)** — an Analyst agent built directly on the `a2a-sdk` (its own AgentCard + AgentExecutor, no LLM). The Claude agent is the A2A *client*; the Analyst is the A2A *server*. |
 
 The four `anthropic`-based scripts form a deliberate progression:
 
@@ -67,6 +68,19 @@ npm install -g @anthropic-ai/claude-code     # the CLI the SDK spawns (Node 18+)
 
 python agent_hub_sdk.py "your question"      # orchestrator + AgentDefinition spokes
 python agent_hub_sdk.py                       # built-in demo query
+```
+
+### `agent_a2a.py` (remote MCP + A2A interop)
+
+Also on the Claude Agent SDK, so it needs the CLI + Node 18+, plus the A2A SDK. It additionally needs network access to `https://mcp.deepwiki.com` for the remote-MCP half:
+
+```bash
+pip install -r requirements-a2a.txt          # claude-agent-sdk + a2a-sdk + uvicorn
+npm install -g @anthropic-ai/claude-code      # the CLI the SDK spawns (Node 18+)
+
+python agent_a2a.py "your question"           # spawns the Analyst A2A agent, then runs the hub
+python agent_a2a.py                           # built-in demo query
+python agent_a2a.py --peer                    # run ONLY the Analyst A2A server (normally auto-spawned)
 ```
 
 ## Models

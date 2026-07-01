@@ -4,15 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Early-stage Python project for experimenting with the Anthropic Claude API. Five scripts:
+Early-stage Python project for experimenting with the Anthropic Claude API. Six scripts:
 
 - `test.py` — minimal smoke test: one `messages.create` call, prints the text blocks.
 - `agent.py` — a small agentic framework with a pluggable tool registry and a manual agentic loop. The model routes each request to the right registered tool (or answers directly).
 - `agent_mcp.py` — same functionality as `agent.py`, but the tools are served over **MCP** instead of being registered in-process. One file plays both roles (server + client).
 - `agent_hub.py` — a **hub-and-spoke multi-agent** system: each spoke is its own Claude agent (own system prompt + own tools) exposed over MCP as a single `ask_<spoke>_agent(task)` delegation tool; the hub is an orchestrator Claude loop whose only tools are those sub-agents. One file plays all roles (orchestrator + each spoke server).
-- `agent_hub_sdk.py` — the **same hub-and-spoke design as `agent_hub.py`**, but built on the **Claude Agent SDK** (`claude-agent-sdk`) instead of the raw `anthropic` API. Spokes are declarative `AgentDefinition`s and the SDK supplies the orchestration (delegation via its built-in Task tool). This is the **only** file that uses a different SDK + toolchain — see its own section and `requirements-agent-sdk.txt`.
+- `agent_hub_sdk.py` — the **same hub-and-spoke design as `agent_hub.py`**, but built on the **Claude Agent SDK** (`claude-agent-sdk`) instead of the raw `anthropic` API. Spokes are declarative `AgentDefinition`s and the SDK supplies the orchestration (delegation via its built-in Task tool). Uses a different SDK + toolchain — see its own section and `requirements-agent-sdk.txt`.
+- `agent_a2a.py` — also on the **Claude Agent SDK**, but instead of local spokes it reaches *outward* two ways: (1) to a **remote (HTTP) MCP server** — public DeepWiki, no auth, pointed at by URL rather than spawned as a subprocess; and (2) to a **foreign-framework agent over the A2A (Agent2Agent) protocol** — the Analyst agent, built directly on the `a2a-sdk` (its own AgentCard + AgentExecutor, deterministic, no LLM). The Claude agent is the A2A *client*; the Analyst is the A2A *server*. Needs `a2a-sdk` — see its own section and `requirements-a2a.txt`.
 
-The four `anthropic`-based scripts form a deliberate progression: in-process tool registry (`agent.py`) → tools behind MCP (`agent_mcp.py`) → whole agents behind MCP (`agent_hub.py`). `agent_hub_sdk.py` then re-expresses that final hub-and-spoke step on a higher-level SDK. The same three tool implementations (`calculator`, `current_datetime`, `text_stats`) are reused across all of them.
+The four `anthropic`-based scripts form a deliberate progression: in-process tool registry (`agent.py`) → tools behind MCP (`agent_mcp.py`) → whole agents behind MCP (`agent_hub.py`). `agent_hub_sdk.py` then re-expresses that final hub-and-spoke step on a higher-level SDK. The same three tool implementations (`calculator`, `current_datetime`, `text_stats`) are reused across the first four; `agent_a2a.py` instead demonstrates *outward* interop (remote MCP + cross-framework A2A) and reuses only the text-analysis idea (in its own deterministic `analyze_text`). `agent_hub_sdk.py` and `agent_a2a.py` are the two files on the Claude Agent SDK + Claude Code CLI toolchain.
 
 `claude_ai_arch/` is an empty placeholder directory. Not a git repository.
 
@@ -40,6 +41,16 @@ pip install -r requirements-agent-sdk.txt   # claude-agent-sdk (separate from re
 npm install -g @anthropic-ai/claude-code     # the CLI the SDK spawns (Node 18+)
 python agent_hub_sdk.py "your question"      # run the orchestrator + its AgentDefinition spokes
 python agent_hub_sdk.py                       # run the built-in demo query
+```
+
+`agent_a2a.py` needs the same CLI + Node 18+, plus the A2A SDK, and network access to `https://mcp.deepwiki.com`:
+
+```bash
+pip install -r requirements-a2a.txt          # claude-agent-sdk + a2a-sdk + uvicorn
+npm install -g @anthropic-ai/claude-code      # the CLI the SDK spawns (Node 18+)
+python agent_a2a.py "your question"           # spawn the Analyst A2A agent, then run the hub
+python agent_a2a.py                            # run the built-in demo query
+python agent_a2a.py --peer                     # run ONLY the Analyst A2A server (normally auto-spawned)
 ```
 
 Note: `agent_mcp.py`'s module docstring references a `.venv-mcp` and Python 3.9 — that is stale; there is one `.venv` on Python 3.12 and it runs MCP fine.
@@ -86,16 +97,26 @@ The same hub-and-spoke intent as `agent_hub.py`, but the orchestration is the **
 
 Key contrasts with `agent_hub.py`: delegation is the SDK's built-in Task tool (not a custom `ask_<spoke>_agent` MCP tool); spokes are in-process `AgentDefinition` objects (not stdio MCP subprocesses); and **we write no loop** — `query()` runs it. Unlike the `anthropic`-based files, this SDK spawns the **Claude Code CLI** as a subprocess to run the agent, so it needs the CLI + Node 18+ in addition to `pip install -r requirements-agent-sdk.txt`. It still reads `ANTHROPIC_API_KEY` from `.env`.
 
+## `agent_a2a.py` architecture
+
+Also on the Claude Agent SDK, but where `agent_hub_sdk.py` delegates *inward* to local `AgentDefinition` spokes, this file interoperates *outward* with two independent systems. The file is organized in three parts and runs in two modes selected by argv (`--peer` → the Analyst server only; otherwise → the orchestrator, which auto-spawns the peer):
+
+- **Part 1 — the Analyst agent, built on the A2A SDK (a *different framework*).** No Claude, no LLM: `AnalystAgentExecutor(AgentExecutor)` wraps a deterministic `analyze_text` (word/char/sentence counts + top keywords). It follows the `a2a-sdk` server contract — subclass `AgentExecutor`, drive a `TaskUpdater` through `TASK_STATE_WORKING → TASK_STATE_COMPLETED`, emit the answer as an artifact. `build_peer_app()` assembles a plain **Starlette** app from `create_agent_card_routes(card)` (serves `/.well-known/agent-card.json`) + `create_jsonrpc_routes(handler, "/")`, wired through a `DefaultRequestHandler` + `InMemoryTaskStore`; `run_peer()` serves it with **uvicorn** on `127.0.0.1:9100`.
+- **Part 2 — the A2A client bridge (where agent-to-agent actually happens).** `ask_peer_over_a2a(task_text)` resolves the Analyst's card via `A2ACardResolver`, opens a client with `create_client(agent=card, client_config=ClientConfig(...))`, sends a `SendMessageRequest(message=new_text_message(...))`, and stitches text out of the streamed `StreamResponse` oneof (`task` / `message` / `status_update` / `artifact_update`). This is wrapped in a single Claude SDK `@tool`, `ask_analyst_agent`, so "delegate to the Analyst" is one tool call from the orchestrator's view. That tool is bundled into an in-process `create_sdk_mcp_server(name="bridge", ...)` → `mcp__bridge__ask_analyst_agent`.
+- **Part 3 — the hub.** `run_orchestrator` calls `query()` with `ClaudeAgentOptions(mcp_servers={"bridge": <sdk server>, "deepwiki": {"type": "http", "url": "https://mcp.deepwiki.com/mcp"}}, allowed_tools=[ASK_ANALYST, DW_STRUCTURE, DW_CONTENTS, DW_ASK], ...)`. `run_with_peer` spawns `sys.executable __file__ --peer` as a subprocess, polls the agent-card endpoint via `_wait_for_peer()` until it's live, runs the hub, then tears the subprocess down in a `finally`.
+
+Two things here differ from every other file in the repo: the MCP server is **remote HTTP** (a `{"type": "http", "url": ...}` config the SDK connects to, *not* a stdio subprocess we spawn), and its tools are named `mcp__deepwiki__<tool>` (`read_wiki_structure` / `read_wiki_contents` / `ask_question`) — remote MCP tools use the same `mcp__<server>__<tool>` naming as in-process ones, so they must be listed in `allowed_tools` by that name or the non-interactive CLI denies them. The Analyst is deterministic on purpose (no second API key needed); swapping its `AgentExecutor` for a LangGraph/CrewAI/OpenAI agent would leave the rest of the file unchanged — that's the payoff of a shared protocol. Fully **async**; still reads `ANTHROPIC_API_KEY` from `.env`.
+
 ## Client-side vs server-side tools
 
 The registry/`run_tool` path is for **client-side** tools only (we execute them). **Server-side** tools (e.g. web search `{"type": "web_search_20260209", "name": "web_search"}`) run on Anthropic's infrastructure — add them directly to the `tools` list in `run_agent`, *not* the registry, and the loop must then also handle `stop_reason == "pause_turn"` (re-send to resume). Note: web search is currently **not enabled for this org** (returns 400 `Web search is not enabled`); enable it in the Anthropic Console before using it.
 
 ## Key details
 
-- `requirements.txt` covers the four `anthropic`-based scripts: its direct dependencies are `anthropic[mcp]` (the SDK plus its MCP extra, which pulls in `mcp`) and `python-dotenv`; everything else is transitive (it's a full `pip freeze`). `agent_hub_sdk.py`'s extra dependency lives in **`requirements-agent-sdk.txt`** (`claude-agent-sdk`), kept separate because it's a different toolchain that also needs the Claude Code CLI + Node 18+.
+- `requirements.txt` covers the four `anthropic`-based scripts: its direct dependencies are `anthropic[mcp]` (the SDK plus its MCP extra, which pulls in `mcp`) and `python-dotenv`; everything else is transitive (it's a full `pip freeze`). `agent_hub_sdk.py`'s extra dependency lives in **`requirements-agent-sdk.txt`** (`claude-agent-sdk`), kept separate because it's a different toolchain that also needs the Claude Code CLI + Node 18+. `agent_a2a.py`'s dependencies live in **`requirements-a2a.txt`** (`claude-agent-sdk` + `a2a-sdk` + `uvicorn`) — same CLI/Node toolchain as `agent_hub_sdk.py`, plus the A2A stack (`a2a-sdk` pulls in `starlette`; `uvicorn` serves the Analyst).
 - `anthropic.Anthropic()` / `AsyncAnthropic()` read `ANTHROPIC_API_KEY` from the environment automatically — `load_dotenv()` must run first.
 - `response.content` is a list of content blocks; filter on `block.type == "text"` to extract text and `block.type == "tool_use"` for tool calls.
 - When appending an assistant turn to `messages`, append the whole `response.content` (not just text) so `tool_use` blocks are preserved for the next request.
-- `agent_mcp.py` and `agent_hub.py` shell out to `sys.executable` to launch their MCP server subprocess(es), so always run them from this project's `.venv` (where `mcp` is installed) — the spawned servers inherit that interpreter.
-- The `anthropic`-based scripts use the `claude-haiku-4-5` model (the `MODEL` constant in each agent; a string literal in `test.py`); `agent_hub_sdk.py` uses the SDK's `"haiku"` alias (its own `MODEL` constant), which resolves to the latest Haiku. When choosing models, prefer current Claude model IDs.
+- `agent_mcp.py` and `agent_hub.py` shell out to `sys.executable` to launch their MCP server subprocess(es), so always run them from this project's `.venv` (where `mcp` is installed) — the spawned servers inherit that interpreter. `agent_a2a.py` does the same to spawn its Analyst A2A server (`sys.executable __file__ --peer`), so run it from `.venv` too (where `a2a-sdk` + `uvicorn` live).
+- The `anthropic`-based scripts use the `claude-haiku-4-5` model (the `MODEL` constant in each agent; a string literal in `test.py`); `agent_hub_sdk.py` and `agent_a2a.py` use the SDK's `"haiku"` alias (each its own `MODEL` constant), which resolves to the latest Haiku. When choosing models, prefer current Claude model IDs.
 - `agent.py`'s `@tool` decorator emits **strict** schemas (`"strict": True` + `"additionalProperties": False`); `agent_mcp.py`/`agent_hub.py` instead let FastMCP / hand-written schemas describe the tools, so they are not strict. `agent_hub_sdk.py` uses the Claude Agent SDK's own `@tool` decorator — a different decorator entirely (`@tool(name, description, schema)` wrapping an `async` handler), not `agent.py`'s registry decorator.
