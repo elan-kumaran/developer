@@ -12,6 +12,7 @@ An early-stage Python project for experimenting with the [Anthropic Claude API](
 | `agent_hub.py` | A **hub-and-spoke multi-agent** system: each spoke is its own Claude agent (own system prompt + own tools) exposed over MCP as a single `ask_<spoke>_agent(task)` delegation tool. The hub is an orchestrator loop whose only tools are those sub-agents. |
 | `agent_hub_sdk.py` | The **same hub-and-spoke design** as `agent_hub.py`, but built on the **Claude Agent SDK** (`claude-agent-sdk`). Spokes are declarative `AgentDefinition`s and the SDK supplies the orchestration. |
 | `agent_a2a.py` | A Claude Agent SDK orchestrator that reaches **outward** two ways: to a **remote (HTTP) MCP server** (public DeepWiki, no auth) and to a **foreign-framework agent over the [A2A protocol](https://a2a-protocol.org/)** — an Analyst agent built directly on the `a2a-sdk` (its own AgentCard + AgentExecutor, no LLM). The Claude agent is the A2A *client*; the Analyst is the A2A *server*. |
+| `agent_memory.py` | A standalone demo of the **six memory types** in agentic architectures — sensory, short-term/working, long-term, episodic, semantic, and procedural — each a separate, inspectable store wired into one agent. Volatile tiers reset per session; durable tiers persist to disk (proven by a two-session demo). Uses only `requirements.txt`. |
 
 The four `anthropic`-based scripts form a deliberate progression:
 
@@ -54,6 +55,10 @@ python agent_mcp.py --server          # MCP server mode only (normally auto-spaw
 python agent_hub.py "your question"   # orchestrator (auto-spawns every spoke server)
 python agent_hub.py                   # built-in demo query
 python agent_hub.py --server math     # run one spoke as an MCP server (math|text|time)
+
+python agent_memory.py                # two-session demo of all six memory types
+python agent_memory.py "your message" # one turn against the persisted long-term memory
+python agent_memory.py --inspect      # dump .agent_memory/ (--forget wipes it)
 ```
 
 > Run the `agent_mcp.py` / `agent_hub.py` scripts from this project's `.venv`, since they shell out to spawn their MCP server subprocesses and the spawned servers inherit that interpreter.

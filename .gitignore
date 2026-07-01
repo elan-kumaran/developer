@@ -1,5 +1,6 @@
 .env
 .venv
+.agent_memory/
 
 # Python
 __pycache__/

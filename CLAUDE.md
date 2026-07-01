@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Early-stage Python project for experimenting with the Anthropic Claude API. Six scripts:
+Early-stage Python project for experimenting with the Anthropic Claude API. Seven scripts:
 
 - `test.py` — minimal smoke test: one `messages.create` call, prints the text blocks.
 - `agent.py` — a small agentic framework with a pluggable tool registry and a manual agentic loop. The model routes each request to the right registered tool (or answers directly).
@@ -12,6 +12,7 @@ Early-stage Python project for experimenting with the Anthropic Claude API. Six 
 - `agent_hub.py` — a **hub-and-spoke multi-agent** system: each spoke is its own Claude agent (own system prompt + own tools) exposed over MCP as a single `ask_<spoke>_agent(task)` delegation tool; the hub is an orchestrator Claude loop whose only tools are those sub-agents. One file plays all roles (orchestrator + each spoke server).
 - `agent_hub_sdk.py` — the **same hub-and-spoke design as `agent_hub.py`**, but built on the **Claude Agent SDK** (`claude-agent-sdk`) instead of the raw `anthropic` API. Spokes are declarative `AgentDefinition`s and the SDK supplies the orchestration (delegation via its built-in Task tool). Uses a different SDK + toolchain — see its own section and `requirements-agent-sdk.txt`.
 - `agent_a2a.py` — also on the **Claude Agent SDK**, but instead of local spokes it reaches *outward* two ways: (1) to a **remote (HTTP) MCP server** — public DeepWiki, no auth, pointed at by URL rather than spawned as a subprocess; and (2) to a **foreign-framework agent over the A2A (Agent2Agent) protocol** — the Analyst agent, built directly on the `a2a-sdk` (its own AgentCard + AgentExecutor, deterministic, no LLM). The Claude agent is the A2A *client*; the Analyst is the A2A *server*. Needs `a2a-sdk` — see its own section and `requirements-a2a.txt`.
+- `agent_memory.py` — a standalone teaching demo (back on the raw `anthropic` SDK + a manual loop, like `agent.py`) that implements the **six memory types of agentic architectures** as six separate, inspectable stores wired into one agent: sensory, short-term/working, long-term, episodic, semantic, procedural. The volatile tiers (sensory, working) reset per session; the durable tiers (episodic/semantic/procedural, unified by a long-term facade) persist to a `.agent_memory/` directory. Not part of the progression above — see its own section. Uses only `requirements.txt`.
 
 The four `anthropic`-based scripts form a deliberate progression: in-process tool registry (`agent.py`) → tools behind MCP (`agent_mcp.py`) → whole agents behind MCP (`agent_hub.py`). `agent_hub_sdk.py` then re-expresses that final hub-and-spoke step on a higher-level SDK. The same three tool implementations (`calculator`, `current_datetime`, `text_stats`) are reused across the first four; `agent_a2a.py` instead demonstrates *outward* interop (remote MCP + cross-framework A2A) and reuses only the text-analysis idea (in its own deterministic `analyze_text`). `agent_hub_sdk.py` and `agent_a2a.py` are the two files on the Claude Agent SDK + Claude Code CLI toolchain.
 
@@ -32,6 +33,9 @@ python agent_mcp.py --server         # MCP server mode only (normally auto-spawn
 python agent_hub.py "your question"  # run the orchestrator (auto-spawns every spoke server)
 python agent_hub.py                  # run the built-in demo query
 python agent_hub.py --server math    # run one spoke as an MCP server (normally auto-spawned; math|text|time)
+python agent_memory.py               # the two-session six-memory-types demo (no extra deps)
+python agent_memory.py "your message"  # one turn against the persisted long-term memory
+python agent_memory.py --inspect     # print what's in .agent_memory/ ; --forget wipes it
 ```
 
 `agent_hub_sdk.py` needs an extra dependency + the Claude Code CLI (see its architecture section):
@@ -106,6 +110,16 @@ Also on the Claude Agent SDK, but where `agent_hub_sdk.py` delegates *inward* to
 - **Part 3 — the hub.** `run_orchestrator` calls `query()` with `ClaudeAgentOptions(mcp_servers={"bridge": <sdk server>, "deepwiki": {"type": "http", "url": "https://mcp.deepwiki.com/mcp"}}, allowed_tools=[ASK_ANALYST, DW_STRUCTURE, DW_CONTENTS, DW_ASK], ...)`. `run_with_peer` spawns `sys.executable __file__ --peer` as a subprocess, polls the agent-card endpoint via `_wait_for_peer()` until it's live, runs the hub, then tears the subprocess down in a `finally`.
 
 Two things here differ from every other file in the repo: the MCP server is **remote HTTP** (a `{"type": "http", "url": ...}` config the SDK connects to, *not* a stdio subprocess we spawn), and its tools are named `mcp__deepwiki__<tool>` (`read_wiki_structure` / `read_wiki_contents` / `ask_question`) — remote MCP tools use the same `mcp__<server>__<tool>` naming as in-process ones, so they must be listed in `allowed_tools` by that name or the non-interactive CLI denies them. The Analyst is deterministic on purpose (no second API key needed); swapping its `AgentExecutor` for a LangGraph/CrewAI/OpenAI agent would leave the rest of the file unchanged — that's the payoff of a shared protocol. Fully **async**; still reads `ANTHROPIC_API_KEY` from `.env`.
+
+## `agent_memory.py` architecture
+
+A standalone demo of the **six memory types** used in agentic architectures, each a distinct class, all wired into one manual `anthropic` agentic loop (same loop shape as `agent.py`). It is *not* part of the tool-registry → MCP → hub progression; it is orthogonal, about memory rather than delegation. The six, grouped by volatility:
+
+- **Volatile (per-session, RAM only):** `SensoryMemory` — a raw-input buffer with a TTL that decays almost immediately (input is `perceive()`d, `read()` once to promote it, then cleared). `WorkingMemory` — a bounded sliding window (`deque(maxlen=…)`) of clean conversation turns plus a task `scratchpad` that is wiped at the start of each turn; `as_messages()` is what feeds the API `messages`.
+- **Durable (persisted to `.agent_memory/`):** `LongTermMemory` is a *facade*, not a fourth content type — it owns the directory and the `load_all()/save_all()` lifecycle that backs the next three. `EpisodicMemory` — append-only `(timestamp, input, response)` episodes with keyword-overlap `recall()`. `SemanticMemory` — key→value facts. `ProceduralMemory` — a list of learned behavioral rules. Each persists to its own JSON file.
+- **How memory becomes behavior:** `MemoryAgent.turn()` runs sensory→working, then `_system_prompt()` assembles the system prompt from `BASE_SYSTEM` + procedural rules + semantic facts + episodes auto-recalled for the current input. Three client-side tools let the model *write* memory: `remember_fact` (semantic), `learn_rule` (procedural), `recall_memory` (read). After each turn it records an episode and calls `save_all()`. A dimmed dashboard of all six stores prints to stderr per turn.
+
+The persistence proof is `run_demo()` (the no-arg default): session 1 teaches facts + a rule; session 2 constructs a **new** `MemoryAgent` (empty sensory/working) against the same directory and still knows the user and applies the learned rule, because the durable tiers reloaded from disk. `--inspect` dumps the store; `--forget` wipes it. `.agent_memory/` is gitignored.
 
 ## Client-side vs server-side tools
 
