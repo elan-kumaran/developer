@@ -8,3 +8,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Separate git project (see agentic_vacation_booking/.git)
+agentic_vacation_booking/
